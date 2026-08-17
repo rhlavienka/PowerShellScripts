@@ -15,11 +15,11 @@
     Pattern source: https://techcommunity.microsoft.com/blog/exchange/more-efficient-bulk-operations-with-powershell-parallelism/4409693
 
     You MUST FIRST connect interactively in the main window:
-        Connect-ExchangeOnline -UserPrincipalName admin@bvsas1.onmicrosoft.com
+        Connect-ExchangeOnline 
 #>
 
 param(
-    [string]$SuffixToRemove = "czechtoll.cz",
+    [string]$SuffixToRemove = "old-domain.com",
     [int]$ThrottleLimit = 8,
     [Parameter(Mandatory=$true)]
     [string]$AdminUPN,                 # UPN of the admin you are already connected with interactively
