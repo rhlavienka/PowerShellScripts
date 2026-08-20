@@ -23,8 +23,17 @@
 .PARAMETER WhatIfMode
     If $true, the script only prints what it would do, without making real changes.
 
+.EXAMPLE
+    .\Deploy-ExchangeDatabases.ps1 -CsvPath "C:\Temp\databases.csv"
+    Runs in WhatIf mode (default) and only prints the planned actions for all three phases.
+
+.EXAMPLE
+    .\Deploy-ExchangeDatabases.ps1 -CsvPath "C:\Temp\databases.csv" -WhatIfMode $false
+    Performs the actual deployment: creates the primary databases, adds the passive
+    copies, and prints the resulting per-server layout check.
+
 .NOTES
-    Version: 1.0
+    Version: 1.0 (2026-08-20)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
     Expected CSV columns:
       DatabaseName, HomeSite, VolumeLetter, EdbFilePath, LogFolderPath,
