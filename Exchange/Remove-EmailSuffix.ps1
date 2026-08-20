@@ -1,9 +1,13 @@
-#Requires -Version 7.0
 <#
-    Version: 1.0
-    Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
+.SYNOPSIS
+    Fast (parallel) removal of email addresses with a given domain suffix from
+    Exchange Online recipients.
 
-    Fast (parallel) removal of email addresses with a given domain from EXO recipients.
+.DESCRIPTION
+    Removes all email addresses ending in the given domain suffix from EXO recipients
+    (mailboxes, mail users, mail contacts, distribution/security groups, Microsoft 365
+    groups). Recipients are fetched with a single bulk query, split into batches, and
+    processed in parallel via ForEach-Object -Parallel.
 
     Parallelization works WITHOUT a registered (app-only) application - it relies
     on Connect-ExchangeOnline, which has multithreading enabled natively and
@@ -15,8 +19,45 @@
     Pattern source: https://techcommunity.microsoft.com/blog/exchange/more-efficient-bulk-operations-with-powershell-parallelism/4409693
 
     You MUST FIRST connect interactively in the main window:
-        Connect-ExchangeOnline 
+        Connect-ExchangeOnline
+
+.PARAMETER SuffixToRemove
+    Domain suffix (without "@") whose addresses should be removed from recipients.
+    Default: "old-domain.com"
+
+.PARAMETER ThrottleLimit
+    Number of parallel runspaces (batches) used to process recipients. Default: 8
+
+.PARAMETER AdminUPN
+    UPN of the administrator account that is already connected interactively in the
+    main window; used to reconnect inside a parallel runspace if its own connection
+    check fails.
+
+.PARAMETER WhatIf
+    Dry-run switch. When set, the script only reports which addresses would be
+    removed, without making any changes.
+
+.PARAMETER LogPath
+    Path to the CSV file where per-recipient results (OK / FAIL / DryRun) are logged.
+    Default: ".\Remove-EmailSuffix-<timestamp>.csv"
+
+.EXAMPLE
+    Connect-ExchangeOnline -UserPrincipalName admin@contoso.com
+    .\Remove-EmailSuffix.ps1 -AdminUPN admin@contoso.com -WhatIf
+    Connects interactively, then previews which "@old-domain.com" addresses would be
+    removed, without making any changes.
+
+.EXAMPLE
+    .\Remove-EmailSuffix.ps1 -AdminUPN admin@contoso.com -SuffixToRemove "old-domain.com" -ThrottleLimit 8
+    Removes all "@old-domain.com" addresses from EXO recipients using 8 parallel
+    runspaces and logs the results to a timestamped CSV file.
+
+.NOTES
+    Version: 1.0 (2026-08-20)
+    Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
 #>
+
+#Requires -Version 7.0
 
 param(
     [string]$SuffixToRemove = "old-domain.com",

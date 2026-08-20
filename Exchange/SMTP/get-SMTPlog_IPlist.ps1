@@ -1,23 +1,29 @@
-# ============================================================
-# Exchange SMTP Relay Usage Analysis
-#
-# Version: 1.0
-# Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
-#
-# Determines:
-#   - Client source IP address
-#   - Receive Connector
-#   - Number of sent messages (MAIL FROM)
-#
-# Output:
-#   - CSV export
-#   - Out-GridView
-#   - Console
-#
-# Exchange SMTP Protocol Logs:
-#   FrontEnd\ProtocolLog\SmtpReceive
-#
-# ============================================================
+<#
+.SYNOPSIS
+    Analyzes Exchange SMTP protocol logs to report relay usage by client IP and receive connector.
+
+.DESCRIPTION
+    Parses the most recent Exchange FrontEnd SMTP Receive protocol logs
+    (FrontEnd\ProtocolLog\SmtpReceive) and counts sent messages (MAIL FROM),
+    grouped by client source IP address and Receive Connector.
+    Results are exported to CSV, opened in Out-GridView, and printed to the console.
+
+    The script has no parameters - configuration (log path, number of logs to
+    process, output file) is set via the variables at the top of the script
+    ($LogPath, $LastLogs, $CsvFile). Edit them directly if your environment
+    differs from the defaults.
+
+.EXAMPLE
+    .\get-SMTPlog_IPlist.ps1
+    Processes the 20 most recent SMTP Receive protocol logs on the local Exchange
+    server, exports a CSV to C:\Temp, and opens the results in Out-GridView.
+
+.NOTES
+    Version: 1.0 (2026-08-20)
+    Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
+    Run locally on an Exchange server with access to:
+      C:\Program Files\Microsoft\Exchange Server\V15\TransportRoles\Logs\FrontEnd\ProtocolLog\SmtpReceive
+#>
 
 # Path to SMTP Receive logs
 $LogPath = "C:\Program Files\Microsoft\Exchange Server\V15\TransportRoles\Logs\FrontEnd\ProtocolLog\SmtpReceive"

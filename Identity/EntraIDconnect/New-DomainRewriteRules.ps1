@@ -17,8 +17,17 @@
     taken, automatically picks the next free Precedence numbers instead of
     failing. Default 50.
 
+.EXAMPLE
+    .\New-DomainRewriteRules.ps1 -OldDomain "old-domain.sk" -NewDomain "new-domain.sk"
+    Creates the 3 outbound sync rules (userPrincipalName, mail, proxyAddresses)
+    starting at the default Precedence 50, rewriting old-domain.sk to new-domain.sk.
+
+.EXAMPLE
+    .\New-DomainRewriteRules.ps1 -OldDomain "old-domain.sk" -NewDomain "new-domain.sk" -BasePrecedence 100
+    Same as above, but starts searching for free Precedence values from 100 instead of 50.
+
 .NOTES
-    Version: 1.0
+    Version: 1.0 (2026-08-20)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
     - Run on the Entra Connect server as Administrator.
     - Before running, back up the configuration (Get-ADSyncRule | Export-Clixml backup.xml).

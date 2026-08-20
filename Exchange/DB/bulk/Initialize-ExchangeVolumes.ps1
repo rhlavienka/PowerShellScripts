@@ -36,8 +36,19 @@
 .PARAMETER WhatIfMode
     If $true (default), only prints the plan without making real changes.
 
+.EXAMPLE
+    .\Initialize-ExchangeVolumes.ps1
+    Runs in WhatIf mode (default): plans letters H..S against all RAW disks of at
+    least 1000 GB and prints what would be done, without formatting anything.
+
+.EXAMPLE
+    .\Initialize-ExchangeVolumes.ps1 -DiskNumbers 2,3,4,5 -WhatIfMode $false
+    Initializes, partitions, and formats the specified disks (in the given order)
+    as ReFS with a 64K allocation unit and integrity streams disabled, assigning
+    them letters H..K.
+
 .NOTES
-    Version: 1.0
+    Version: 1.0 (2026-08-20)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
     WARNING: Formatting is IRREVERSIBLE. Run only on the correct server and disks.
     Recommendation: run first in the default WhatIf mode and review the plan.
