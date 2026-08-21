@@ -31,7 +31,7 @@
     Minimum disk size (GB) to be considered a data disk. Default 1000.
 
 .PARAMETER LabelPrefix
-    Prefix for the volume label. Default 'EXVOL'. Result e.g. EXVOL_H.
+    Prefix for the volume label. Default 'EXDB'. Result e.g. EXDB_H.
 
 .PARAMETER WhatIfMode
     If $true (default), only prints the plan without making real changes.
@@ -48,8 +48,14 @@
     them letters H..K.
 
 .NOTES
-    Version: 1.0 (2026-08-20)
+    Version: 1.1 (2026-08-21)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
+
+    Changelog:
+      1.1 (2026-08-21) - Default LabelPrefix changed from 'EXVOL' to 'EXDB' to match
+                          the real-world volume label convention; synced .PARAMETER doc.
+      1.0 (2026-08-20) - Initial version.
+
     WARNING: Formatting is IRREVERSIBLE. Run only on the correct server and disks.
     Recommendation: run first in the default WhatIf mode and review the plan.
 
@@ -64,7 +70,7 @@ param(
     [int]   $VolumeCount = 12,
     [int[]] $DiskNumbers,
     [int]   $MinSizeGB = 1000,
-    [string]$LabelPrefix = 'EXVOL',
+    [string]$LabelPrefix = 'EXDB',
     [bool]  $WhatIfMode = $true
 )
 

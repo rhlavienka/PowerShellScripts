@@ -11,6 +11,20 @@
                 Add-MailboxDatabaseCopy with the corresponding ActivationPreference.
       PHASE 3 - verifies the resulting layout and prints a per-server count check.
 
+    Between PHASE 1 and PHASE 2 the script polls every primary database until it
+    reports Mounted, or aborts if MountTimeoutSeconds is exceeded (see PARAMETER
+    section below). If it aborts:
+      1. Wait for the affected server(s) to settle, then check database health
+         manually, e.g.:
+           Get-MailboxDatabaseCopyStatus -Identity "<DatabaseName>\<Server>"
+           Get-EventLog -LogName Application -Source MSExchangeIS -Newest 20
+         Look for the cause (slow disk, EDB/Log path not reachable, server not
+         ready, etc.) and fix it.
+      2. Once the primary database(s) mount cleanly, simply re-run the script
+         with the same CsvPath. PHASE 1 skips databases that already exist
+         (Get-MailboxDatabase check), so it safely resumes at the mount check
+         and continues into PHASE 2/3.
+
     Prerequisites:
       - The script runs in Exchange Management Shell (EMS) with sufficient permissions.
       - Disk volumes (letters H..S) are created, formatted (ReFS 64K, integrity
@@ -23,6 +37,13 @@
 .PARAMETER WhatIfMode
     If $true, the script only prints what it would do, without making real changes.
 
+.PARAMETER MountTimeoutSeconds
+    Maximum time (seconds) to wait, after PHASE 1, for every primary database to
+    report a Mounted status before PHASE 2 starts adding passive copies.
+
+.PARAMETER MountCheckIntervalSeconds
+    Polling interval (seconds) used while waiting for primary databases to mount.
+
 .EXAMPLE
     .\Deploy-ExchangeDatabases.ps1 -CsvPath "C:\Temp\databases.csv"
     Runs in WhatIf mode (default) and only prints the planned actions for all three phases.
@@ -33,8 +54,15 @@
     copies, and prints the resulting per-server layout check.
 
 .NOTES
-    Version: 1.0 (2026-08-20)
+    Version: 1.1 (2026-08-21)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
+
+    Changelog:
+      1.1 (2026-08-21) - Added a real Mounted-status check for primary databases
+                          before PHASE 2 (MountTimeoutSeconds / MountCheckIntervalSeconds),
+                          replacing the fixed 60s Start-Sleep.
+      1.0 (2026-08-20) - Initial version.
+
     Expected CSV columns:
       DatabaseName, HomeSite, VolumeLetter, EdbFilePath, LogFolderPath,
       Server, ActivationPreference, CopyRole
@@ -46,7 +74,13 @@ param(
     [string]$CsvPath,
 
     [Parameter(Mandatory=$false)]
-    [bool]$WhatIfMode = $true
+    [bool]$WhatIfMode = $true,
+
+    [Parameter(Mandatory=$false)]
+    [int]$MountTimeoutSeconds = 300,
+
+    [Parameter(Mandatory=$false)]
+    [int]$MountCheckIntervalSeconds = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -103,8 +137,27 @@ foreach ($row in $primaries) {
 }
 
 if (-not $WhatIfMode) {
-    Write-Log "Waiting 60s to settle after database creation..."
-    Start-Sleep -Seconds 60
+    Write-Log "Waiting for primary databases to report Mounted (timeout ${MountTimeoutSeconds}s)..."
+
+    $pending = $primaries | ForEach-Object { "$($_.DatabaseName)\$($_.Server)" }
+    $elapsed = 0
+
+    while ($pending.Count -gt 0 -and $elapsed -lt $MountTimeoutSeconds) {
+        $pending = $pending | Where-Object {
+            $status = Get-MailboxDatabaseCopyStatus -Identity $_ -ErrorAction SilentlyContinue
+            $status.Status -ne 'Mounted'
+        }
+        if ($pending.Count -gt 0) {
+            Start-Sleep -Seconds $MountCheckIntervalSeconds
+            $elapsed += $MountCheckIntervalSeconds
+        }
+    }
+
+    if ($pending.Count -gt 0) {
+        throw "Primary database(s) not Mounted after ${MountTimeoutSeconds}s, aborting before PHASE 2: $($pending -join ', ')"
+    }
+
+    Write-Log "All primary databases are Mounted."
 }
 
 # ------------------------------------------------------------------
