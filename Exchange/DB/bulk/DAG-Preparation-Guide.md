@@ -14,6 +14,13 @@ Because the DAG is stretched across two Active Directory sites, it needs `Datace
   ```powershell
   Get-WindowsFeature Failover-Clustering | Select Name, InstallState
   ```
+- **`Remote Registry` service is `Automatic`/running on every member being added.** `Add-DatabaseAvailabilityGroupServer` / `AddClusterNode()` reads and writes registry data on the joining node remotely, over Remote Registry — if it's `Disabled` (common on hardened images/security baselines that turn it off as an attack-surface reduction measure), the join fails with `Cluster API failed: "AddClusterNode() (MaxPercentage=12) failed with 0x35. Error: The network path was not found"`, even though the node is otherwise perfectly reachable on the network. Check and fix on every member *before* step 4:
+  ```powershell
+  Get-Service RemoteRegistry | Select Name, Status, StartType
+  # if StartType is not Automatic:
+  Set-Service RemoteRegistry -StartupType Automatic
+  Start-Service RemoteRegistry
+  ```
 - Static IP addressing on every member; no DHCP on the MAPI network.
 - A single network (MAPI) per server is sufficient — see the note in step 5 on why a dedicated replication network is no longer the default recommendation on modern 10 Gbit+ links.
 - Name resolution: all 8 servers can resolve each other and the witness server by short name and FQDN, in both AD sites.
