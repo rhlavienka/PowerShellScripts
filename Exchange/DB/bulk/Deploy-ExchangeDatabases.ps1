@@ -54,10 +54,14 @@
     copies, and prints the resulting per-server layout check.
 
 .NOTES
-    Version: 1.1 (2026-08-21)
+    Version: 1.2 (2026-08-24)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
 
     Changelog:
+      1.2 (2026-08-24) - Added DeletedItemRetention (10 days) and
+                          RetainDeletedItemsUntilBackup ($true) applied to every
+                          primary database in PHASE 1, including ones already
+                          existing from a prior/interrupted run (retroactive).
       1.1 (2026-08-21) - Added a real Mounted-status check for primary databases
                           before PHASE 2 (MountTimeoutSeconds / MountCheckIntervalSeconds),
                           replacing the fixed 60s Start-Sleep.
@@ -137,6 +141,12 @@ foreach ($row in $primaries) {
 }
 
 if (-not $WhatIfMode) {
+    Write-Log "Applying DeletedItemRetention (10d) / RetainDeletedItemsUntilBackup to all primary databases (incl. pre-existing)..."
+    foreach ($row in $primaries) {
+        $db = $row.DatabaseName
+        Set-MailboxDatabase -Identity $db -DeletedItemRetention 10 -RetainDeletedItemsUntilBackup $true
+    }
+
     Write-Log "Waiting for primary databases to report Mounted (timeout ${MountTimeoutSeconds}s)..."
 
     $pending = $primaries | ForEach-Object { "$($_.DatabaseName)\$($_.Server)" }
