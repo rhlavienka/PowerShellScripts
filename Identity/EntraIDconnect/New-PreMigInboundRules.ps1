@@ -94,13 +94,10 @@
     - Multiple AD DS connectors (multi-forest lab) trigger an interactive
       picker at runtime unless -ADConnectorName is given.
 
-    Version: 2.3 (2026-08-31)
+    Version: 2.2 (2026-08-25)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
 
     Changelog:
-      2.3 (2026-08-31) - Replaced real domain names in the help examples with
-        neutral placeholders (firma3.sk, rhlab.in, contoso.mail.onmicrosoft.com);
-        no functional change.
       2.2 (2026-08-25) - Fixed a bug where "-Rule <single rule>" (anything other
         than "All") silently created nothing: the if/else building $rulesToCreate
         got unrolled from a 1-element array back into a plain string, so
