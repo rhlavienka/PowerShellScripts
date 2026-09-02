@@ -27,13 +27,19 @@
     Name of the IIS website whose logs are read. Default "Default Web Site".
 
 .PARAMETER IncludeOAuth
-    Also parse the Exchange HttpProxy logs
-    (%ExchangeInstallPath%Logging\HttpProxy\*) to resolve clients that
-    authenticate with an OAuth bearer token, which the Security and IIS logs
-    cannot identify. Populates the User_OAuthLog and OAuth_Protocols columns
-    (empty without this switch).
-    Requires the script to run on an Exchange server (install path is read from
-    the ExchangeInstallPath env var, with a registry fallback).
+    Also parse the Exchange HttpProxy logs to resolve clients that authenticate
+    with an OAuth bearer token, which the Security and IIS logs cannot identify.
+    Populates the User_OAuthLog and OAuth_Protocols columns (empty without this
+    switch). Requires the script to run on an Exchange server. The HttpProxy log
+    folder is auto-detected (see -HttpProxyLogPath).
+
+.PARAMETER HttpProxyLogPath
+    Explicit path to the HttpProxy log folder (the one with the per-protocol
+    Owa\Eas\Mapi\... subfolders). Only needed with -IncludeOAuth and only if
+    auto-detection fails. When omitted, the folder is located by: the Exchange
+    install path (which also follows a relocated \V15\Logging junction), then
+    the path configured in the HttpProxy web.config, then a scan of the fixed
+    drives - so relocating the logs to another disk normally needs nothing here.
 
 .PARAMETER ExportCsv
     If set, the result is also saved to a CSV file.
@@ -56,8 +62,13 @@
     (Modern/Hybrid Modern Auth) are resolved instead of showing up with blank
     user columns.
 
+.EXAMPLE
+    .\Get-ConnectedClients.ps1 -IncludeOAuth -HttpProxyLogPath "E:\ExchangeLogging\HttpProxy"
+    Same, but points at a HttpProxy log folder that was moved to another disk
+    and can't be auto-detected.
+
 .NOTES
-    Version: 1.3 (2026-09-02)
+    Version: 1.4 (2026-09-02)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
 
     Note: without -IncludeOAuth this script only resolves the user identity for
@@ -66,10 +77,17 @@
     Auth, Outlook mobile, REST apps) produce no matching Security-log logon and
     no cs-username in the IIS log, so for those the User_SecurityLog /
     User_IISLog / AuthPackage columns stay blank. Pass -IncludeOAuth to also
-    read the Exchange HttpProxy logs (%ExchangeInstallPath%Logging\HttpProxy\*,
-    columns AuthenticationType=OAuth and AuthenticatedUser).
+    read the Exchange HttpProxy logs (columns AuthenticationType=OAuth and
+    AuthenticatedUser).
 
     Changelog:
+      1.4 (2026-09-02) - The HttpProxy log folder is now discovered rather than
+        assumed to be under %ExchangeInstallPath%: explicit -HttpProxyLogPath,
+        else the Exchange install path (which also transparently follows a
+        relocated \V15\Logging directory junction), else the path configured in
+        the HttpProxy web.config files, else a scan of the fixed drives for a
+        Logging\HttpProxy folder with real logs - so moving the logs to another
+        disk no longer breaks -IncludeOAuth.
       1.3 (2026-09-02) - Added -IncludeOAuth: parses the Exchange HttpProxy logs
         to resolve OAuth bearer-token clients (AuthenticationType OAuth/Bearer),
         populating the User_OAuthLog and OAuth_Protocols columns. Install path comes
@@ -97,6 +115,7 @@ param(
     [int]$MinutesBack = 60,
     [string]$SiteName = "Default Web Site",
     [switch]$IncludeOAuth,
+    [string]$HttpProxyLogPath,
     [switch]$ExportCsv,
     [string]$CsvPath = ".\ConnectedClients_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 )
@@ -228,26 +247,91 @@ function Get-IisLogEntries {
     }
 }
 
-function Get-HttpProxyOAuthEntries {
-    param([int]$MinutesBack, [string[]]$IpFilter)
+function Get-ExchangeInstallPath {
+    if ($env:ExchangeInstallPath) { return $env:ExchangeInstallPath }
+    foreach ($ver in 'v15', 'v16') {
+        $p = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\ExchangeServer\$ver\Setup" -ErrorAction SilentlyContinue).MsiInstallPath
+        if ($p) { return $p }
+    }
+    $null
+}
 
-    $exPath = $env:ExchangeInstallPath
-    if (-not $exPath) {
-        foreach ($ver in 'v15', 'v16') {
-            $p = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\ExchangeServer\$ver\Setup" -ErrorAction SilentlyContinue).MsiInstallPath
-            if ($p) { $exPath = $p; break }
+function Resolve-HttpProxyLogRoot {
+    param([string]$ExchangeInstallPath, [string]$ExplicitPath)
+
+    if ($ExplicitPath) {
+        if (Test-Path $ExplicitPath) { return (Resolve-Path $ExplicitPath).Path }
+        Write-Warning "-HttpProxyLogPath '$ExplicitPath' does not exist - falling back to auto-detection."
+    }
+
+    # 1) Default location under the Exchange install path. Test-Path / Get-ChildItem
+    #    transparently follow a directory junction, which is the usual supported
+    #    way the whole \V15\Logging tree gets relocated to another drive.
+    if ($ExchangeInstallPath) {
+        $default = Join-Path $ExchangeInstallPath 'Logging\HttpProxy'
+        if (Test-Path $default) { return $default }
+    }
+
+    # 2) Path configured in the HttpProxy web.config files (used when the logs
+    #    were moved by editing config rather than with a junction).
+    if ($ExchangeInstallPath) {
+        $webConfigs = Get-ChildItem (Join-Path $ExchangeInstallPath 'FrontEnd\HttpProxy') `
+                          -Recurse -Filter 'web.config' -ErrorAction SilentlyContinue
+        foreach ($wc in $webConfigs) {
+            try { [xml]$xml = Get-Content $wc.FullName -Raw -ErrorAction Stop } catch { continue }
+            $paths = $xml.configuration.appSettings.add |
+                     Where-Object { $_.key -match 'HttpProxy.*Log|Log.*(Path|Directory)' -and $_.value } |
+                     ForEach-Object { [Environment]::ExpandEnvironmentVariables($_.value) }
+            foreach ($p in $paths) {
+                # value points straight at (or inside) a ...\HttpProxy folder
+                $m = [regex]::Match($p, '^(?<root>.*[\\/]HttpProxy)([\\/]|$)')
+                if ($m.Success -and (Test-Path $m.Groups['root'].Value)) { return $m.Groups['root'].Value }
+
+                # value points at the base ...\Logging folder - append HttpProxy
+                $m2 = [regex]::Match($p, '^(?<base>.*[\\/]Logging)([\\/]|$)')
+                if ($m2.Success) {
+                    $cand = Join-Path $m2.Groups['base'].Value 'HttpProxy'
+                    if (Test-Path $cand) { return $cand }
+                }
+            }
         }
     }
-    if (-not $exPath) {
-        Write-Warning "Exchange install path not found (ExchangeInstallPath env var / registry) - skipping HttpProxy logs. Run this on an Exchange server."
-        return @()
+
+    # 3) Last resort: a plain move to another drive with no junction and no
+    #    config entry. Check the usual spots, then shallow-scan non-system drives.
+    $fixedDrives = (Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue).DeviceID
+    $guesses = foreach ($d in $fixedDrives) {
+        "$d\Program Files\Microsoft\Exchange Server\V15\Logging\HttpProxy"
+        "$d\Microsoft\Exchange Server\V15\Logging\HttpProxy"
+        "$d\Exchange Server\V15\Logging\HttpProxy"
+        "$d\Exchange\Logging\HttpProxy"
+        "$d\ExchangeLogging\HttpProxy"
+        "$d\Logging\HttpProxy"
+    }
+    foreach ($g in $guesses) { if (Test-Path $g) { return $g } }
+
+    foreach ($d in ($fixedDrives | Where-Object { $_ -ne $env:SystemDrive })) {
+        $hit = Get-ChildItem "$d\" -Directory -Filter 'HttpProxy' -Recurse -Depth 5 -ErrorAction SilentlyContinue |
+               Where-Object {
+                   $_.Parent.Name -eq 'Logging' -and
+                   (Get-ChildItem $_.FullName -Filter '*.LOG' -File -Recurse -ErrorAction SilentlyContinue |
+                    Select-Object -First 1)
+               } | Select-Object -First 1
+        if ($hit) { return $hit.FullName }
     }
 
-    $proxyRoot = Join-Path $exPath 'Logging\HttpProxy'
-    if (-not (Test-Path $proxyRoot)) {
-        Write-Warning "HttpProxy log folder not found: $proxyRoot"
+    $null
+}
+
+function Get-HttpProxyOAuthEntries {
+    param([int]$MinutesBack, [string[]]$IpFilter, [string]$ExplicitPath)
+
+    $proxyRoot = Resolve-HttpProxyLogRoot -ExchangeInstallPath (Get-ExchangeInstallPath) -ExplicitPath $ExplicitPath
+    if (-not $proxyRoot) {
+        Write-Warning "Could not locate the HttpProxy log folder (checked the Exchange install path, the HttpProxy web.config, and the fixed drives). Pass -HttpProxyLogPath explicitly."
         return @()
     }
+    Write-Host "HttpProxy log folder : $proxyRoot" -ForegroundColor DarkGray
 
     # HttpProxy DateTime values are UTC, same as the IIS logs.
     $thresholdUtc = (Get-Date).ToUniversalTime().AddMinutes(-$MinutesBack)
@@ -317,7 +401,7 @@ $iisEntries = Get-IisLogEntries -SiteName $SiteName -MinutesBack $MinutesBack -I
 $oauthEntries = @()
 if ($IncludeOAuth) {
     Write-Host "Reading Exchange HttpProxy logs for OAuth (bearer) clients..." -ForegroundColor Cyan
-    $oauthEntries = Get-HttpProxyOAuthEntries -MinutesBack $MinutesBack -IpFilter $activeIps
+    $oauthEntries = Get-HttpProxyOAuthEntries -MinutesBack $MinutesBack -IpFilter $activeIps -ExplicitPath $HttpProxyLogPath
 }
 
 $results = foreach ($ip in $activeIps) {
