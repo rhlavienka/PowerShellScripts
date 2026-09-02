@@ -34,8 +34,19 @@
     Looks back 120 minutes and also exports the result to a timestamped CSV file.
 
 .NOTES
-    Version: 1.0 (2026-08-20)
+    Version: 1.1 (2026-09-02)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
+
+    Changelog:
+      1.1 (2026-09-02) - Fixed IIS log parsing: the "#Fields:" header is now read
+        from the top of the file instead of from the last 5000 lines (on a busy
+        server the header sits far outside that tail window, which produced
+        "Could not read the IIS log format (#Fields missing)" even for valid W3C
+        logs). The log is now read streaming via [System.IO.File]::ReadLines,
+        "#Fields:" is re-read if it changes mid-file (service restart), the two
+        newest log files are scanned so a UTC/local offset or midnight rollover
+        does not drop entries, and a non-W3C log format is now reported clearly.
+      1.0 (2026-08-20) - Initial version.
 #>
 
 [CmdletBinding()]
@@ -111,31 +122,52 @@ function Get-IisLogEntries {
     $site = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
     if (-not $site) { Write-Warning "IIS site '$SiteName' was not found - skipping IIS logs."; return @() }
 
+    if ($site.logFile.logFormat -and $site.logFile.logFormat -ne 'W3C') {
+        Write-Warning "IIS site '$SiteName' uses '$($site.logFile.logFormat)' log format, not W3C - this script can only parse W3C logs."
+        return @()
+    }
+
     $logDir  = [System.Environment]::ExpandEnvironmentVariables($site.logFile.directory)
     $logPath = Join-Path $logDir "W3SVC$($site.id)"
-    $latest  = Get-ChildItem $logPath -Filter "u_ex*.log" -ErrorAction SilentlyContinue |
-               Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $latest) { Write-Warning "No IIS log file found in $logPath."; return @() }
-
-    $lines = Get-Content $latest.FullName -Tail 5000
-    $fieldLine = $lines | Where-Object { $_ -like '#Fields:*' } | Select-Object -Last 1
-    if (-not $fieldLine) { Write-Warning "Could not read the IIS log format (#Fields missing)."; return @() }
-    $fields = ($fieldLine -replace '#Fields:\s*', '') -split '\s+'
 
     $threshold = (Get-Date).AddMinutes(-$MinutesBack)
 
-    # Note: IIS logs are typically in UTC by default (unless set to Local Time),
-    # while the Security log uses the server's local time - account for this offset when comparing times.
-    $lines | Where-Object { $_ -notlike '#*' -and $_.Trim() -ne '' } | ForEach-Object {
-        $vals = $_ -split '\s+'
-        if ($vals.Count -lt $fields.Count) { return }
-        $obj = [ordered]@{}
-        for ($i = 0; $i -lt $fields.Count; $i++) { $obj[$fields[$i]] = $vals[$i] }
-        $entry = [PSCustomObject]$obj
+    # IIS logs are typically in UTC by default (unless set to Local Time), while
+    # the Security log uses the server's local time - account for this offset
+    # when comparing. Scanning the two newest files makes sure a UTC/local
+    # offset or a midnight rollover doesn't drop the entries we need.
+    $logFiles = Get-ChildItem $logPath -Filter "u_ex*.log" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 2
+    if (-not $logFiles) { Write-Warning "No IIS log file found in $logPath."; return @() }
 
-        [datetime]$entryTime = 0
-        if ([DateTime]::TryParse("$($entry.date) $($entry.time)", [ref]$entryTime)) {
-            if ($entryTime -ge $threshold -and $IpFilter -contains $entry.'c-ip') {
+    foreach ($file in $logFiles) {
+
+        # "#Fields:" sits at the top of the file (and is re-emitted whenever the
+        # column set changes, e.g. after a service restart) - read it from the
+        # header rather than from a fixed-size tail, which on a busy server
+        # never reaches back far enough.
+        $fields = $null
+        foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
+
+            if ($line.StartsWith('#')) {
+                if ($line.StartsWith('#Fields:')) {
+                    $fields = ($line -replace '#Fields:\s*', '') -split '\s+'
+                }
+                continue
+            }
+            if (-not $fields -or $line.Trim() -eq '') { continue }
+
+            $vals = $line -split '\s+'
+            if ($vals.Count -lt $fields.Count) { continue }
+
+            $obj = [ordered]@{}
+            for ($i = 0; $i -lt $fields.Count; $i++) { $obj[$fields[$i]] = $vals[$i] }
+            $entry = [PSCustomObject]$obj
+
+            if ($IpFilter -notcontains $entry.'c-ip') { continue }
+
+            [datetime]$entryTime = 0
+            if ([DateTime]::TryParse("$($entry.date) $($entry.time)", [ref]$entryTime) -and $entryTime -ge $threshold) {
                 [PSCustomObject]@{
                     Time     = $entryTime
                     ClientIP = $entry.'c-ip'
