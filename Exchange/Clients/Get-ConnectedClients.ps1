@@ -2,12 +2,20 @@
 .SYNOPSIS
     Identifies currently connected clients on an Exchange server (by local port, default 443),
     their authentication method (Kerberos/NTLM) from the Security log, and the user identity
-    from the IIS log.
+    from the IIS log. Optionally also resolves OAuth bearer-token clients from the Exchange
+    HttpProxy logs (-IncludeOAuth).
 
 .DESCRIPTION
     Run directly ON the Exchange server (front-end), in a PowerShell console with
     Administrator rights (without elevation the Security log is not readable - the
     result is "No events found" even when the log contains matching records).
+
+    Windows-authenticated clients (Kerberos/NTLM/Basic) are resolved from the
+    Security log + IIS log. Clients that authenticate with an OAuth bearer token
+    (Outlook with Modern/Hybrid Modern Auth, Outlook mobile, REST apps) leave no
+    matching Security-log logon and no cs-username in the IIS log; pass
+    -IncludeOAuth to additionally parse the Exchange HttpProxy logs, where their
+    identity (AuthenticationType=OAuth, AuthenticatedUser) is recorded.
 
 .PARAMETER Port
     Local port on which to look for active connections. Default 443.
@@ -17,6 +25,15 @@
 
 .PARAMETER SiteName
     Name of the IIS website whose logs are read. Default "Default Web Site".
+
+.PARAMETER IncludeOAuth
+    Also parse the Exchange HttpProxy logs
+    (%ExchangeInstallPath%Logging\HttpProxy\*) to resolve clients that
+    authenticate with an OAuth bearer token, which the Security and IIS logs
+    cannot identify. Populates the User_OAuthLog and OAuth_Protocols columns
+    (empty without this switch).
+    Requires the script to run on an Exchange server (install path is read from
+    the ExchangeInstallPath env var, with a registry fallback).
 
 .PARAMETER ExportCsv
     If set, the result is also saved to a CSV file.
@@ -33,20 +50,31 @@
     .\Get-ConnectedClients.ps1 -MinutesBack 120 -ExportCsv
     Looks back 120 minutes and also exports the result to a timestamped CSV file.
 
+.EXAMPLE
+    .\Get-ConnectedClients.ps1 -IncludeOAuth
+    Also parses the Exchange HttpProxy logs so OAuth bearer-token clients
+    (Modern/Hybrid Modern Auth) are resolved instead of showing up with blank
+    user columns.
+
 .NOTES
-    Version: 1.2 (2026-09-02)
+    Version: 1.3 (2026-09-02)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
 
-    Note: this script only resolves the user identity for Windows-authenticated
-    (Kerberos/NTLM/Basic) connections. Clients that authenticate with an OAuth
-    bearer token (Outlook with Modern/Hybrid Modern Auth, Outlook mobile, REST
-    apps) produce no matching Security-log logon and no cs-username in the IIS
-    log, so for those the User_SecurityLog / User_IISLog / AuthPackage columns
-    stay blank. Their identity lives in the Exchange HttpProxy logs
-    (%ExchangeInstallPath%Logging\HttpProxy\*, columns AuthenticationType=OAuth
-    and AuthenticatedUser), which this script does not read.
+    Note: without -IncludeOAuth this script only resolves the user identity for
+    Windows-authenticated (Kerberos/NTLM/Basic) connections. Clients that
+    authenticate with an OAuth bearer token (Outlook with Modern/Hybrid Modern
+    Auth, Outlook mobile, REST apps) produce no matching Security-log logon and
+    no cs-username in the IIS log, so for those the User_SecurityLog /
+    User_IISLog / AuthPackage columns stay blank. Pass -IncludeOAuth to also
+    read the Exchange HttpProxy logs (%ExchangeInstallPath%Logging\HttpProxy\*,
+    columns AuthenticationType=OAuth and AuthenticatedUser).
 
     Changelog:
+      1.3 (2026-09-02) - Added -IncludeOAuth: parses the Exchange HttpProxy logs
+        to resolve OAuth bearer-token clients (AuthenticationType OAuth/Bearer),
+        populating the User_OAuthLog and OAuth_Protocols columns. Install path comes
+        from ExchangeInstallPath with an HKLM\...\ExchangeServer\v15\Setup
+        fallback; HttpProxy timestamps are UTC and handled the same way as IIS.
       1.2 (2026-09-02) - IIS W3C timestamps are always UTC; compare them against
         a UTC threshold and convert to local time for display, so clients are no
         longer silently dropped in non-UTC time zones (e.g. -MinutesBack 60 on a
@@ -68,6 +96,7 @@ param(
     [int]$Port = 443,
     [int]$MinutesBack = 60,
     [string]$SiteName = "Default Web Site",
+    [switch]$IncludeOAuth,
     [switch]$ExportCsv,
     [string]$CsvPath = ".\ConnectedClients_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 )
@@ -199,6 +228,77 @@ function Get-IisLogEntries {
     }
 }
 
+function Get-HttpProxyOAuthEntries {
+    param([int]$MinutesBack, [string[]]$IpFilter)
+
+    $exPath = $env:ExchangeInstallPath
+    if (-not $exPath) {
+        foreach ($ver in 'v15', 'v16') {
+            $p = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\ExchangeServer\$ver\Setup" -ErrorAction SilentlyContinue).MsiInstallPath
+            if ($p) { $exPath = $p; break }
+        }
+    }
+    if (-not $exPath) {
+        Write-Warning "Exchange install path not found (ExchangeInstallPath env var / registry) - skipping HttpProxy logs. Run this on an Exchange server."
+        return @()
+    }
+
+    $proxyRoot = Join-Path $exPath 'Logging\HttpProxy'
+    if (-not (Test-Path $proxyRoot)) {
+        Write-Warning "HttpProxy log folder not found: $proxyRoot"
+        return @()
+    }
+
+    # HttpProxy DateTime values are UTC, same as the IIS logs.
+    $thresholdUtc = (Get-Date).ToUniversalTime().AddMinutes(-$MinutesBack)
+    # Files roll by size, so a recent entry can sit in a file whose LastWriteTime
+    # is already an hour old - widen the file window accordingly.
+    $fileCutoff = (Get-Date).AddMinutes(-$MinutesBack).AddHours(-1)
+
+    $logFiles = Get-ChildItem $proxyRoot -Recurse -Filter '*.LOG' -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -ge $fileCutoff }
+    if (-not $logFiles) { Write-Warning "No recent HttpProxy log files under $proxyRoot."; return @() }
+
+    foreach ($file in $logFiles) {
+
+        $fields    = $null
+        $dataLines = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
+            if ($line.StartsWith('#')) {
+                if ($line.StartsWith('#Fields:')) {
+                    $fields = $line.Substring(8).Trim() -split '\s*,\s*'
+                }
+                continue
+            }
+            # Cheap prefilter before the (relatively expensive) CSV parse - the
+            # literal "OAuth"/"Bearer" almost only appears as the auth type.
+            if ($fields -and ($line -like '*OAuth*' -or $line -like '*Bearer*')) {
+                $dataLines.Add($line)
+            }
+        }
+        if (-not $fields -or $dataLines.Count -eq 0) { continue }
+
+        $dataLines | ConvertFrom-Csv -Header $fields | ForEach-Object {
+            if ($_.AuthenticationType -notmatch 'OAuth|Bearer') { return }
+            if ($IpFilter -notcontains $_.ClientIpAddress)      { return }
+
+            [datetime]$t = 0
+            if (-not [DateTime]::TryParse($_.DateTime, [ref]$t)) { return }
+            $tUtc = $t.ToUniversalTime()
+            if ($tUtc -lt $thresholdUtc) { return }
+
+            [PSCustomObject]@{
+                Time     = $tUtc.ToLocalTime()
+                ClientIP = $_.ClientIpAddress
+                User     = $_.AuthenticatedUser
+                Protocol = $_.Protocol
+                Auth     = $_.AuthenticationType
+            }
+        }
+    }
+}
+
 # --- Main ---
 Write-Host "Looking for active connections on port $Port..." -ForegroundColor Cyan
 $activeIps = Get-ActiveClientConnections -Port $Port
@@ -214,6 +314,12 @@ $secEvents = Get-SecurityLogonEvents -MinutesBack $MinutesBack
 Write-Host "Reading IIS logs for user identity..." -ForegroundColor Cyan
 $iisEntries = Get-IisLogEntries -SiteName $SiteName -MinutesBack $MinutesBack -IpFilter $activeIps
 
+$oauthEntries = @()
+if ($IncludeOAuth) {
+    Write-Host "Reading Exchange HttpProxy logs for OAuth (bearer) clients..." -ForegroundColor Cyan
+    $oauthEntries = Get-HttpProxyOAuthEntries -MinutesBack $MinutesBack -IpFilter $activeIps
+}
+
 $results = foreach ($ip in $activeIps) {
     $hostname = Resolve-ClientHostname -IpAddress $ip
     $lastSec  = $secEvents | Where-Object { $_.SourceIP -eq $ip } | Sort-Object Time -Descending | Select-Object -First 1
@@ -221,6 +327,12 @@ $results = foreach ($ip in $activeIps) {
                  Select-Object -ExpandProperty User -Unique) -join ", "
     $iisUris  = ($iisEntries | Where-Object { $_.ClientIP -eq $ip } |
                  Select-Object -ExpandProperty Uri -Unique | Select-Object -First 3) -join ", "
+
+    $oauthForIp = $oauthEntries | Where-Object { $_.ClientIP -eq $ip }
+    $oauthUsers = ($oauthForIp | Where-Object { $_.User -and $_.User -ne '-' } |
+                   Select-Object -ExpandProperty User -Unique) -join ", "
+    $oauthProto = ($oauthForIp | Where-Object { $_.Protocol } |
+                   Select-Object -ExpandProperty Protocol -Unique) -join ", "
 
     $logonTypeLabel = if ($lastSec.LogonType -and $logonTypeMap.ContainsKey($lastSec.LogonType)) {
         "$($lastSec.LogonType) ($($logonTypeMap[$lastSec.LogonType]))"
@@ -231,9 +343,13 @@ $results = foreach ($ip in $activeIps) {
         Hostname         = $hostname
         User_SecurityLog = $lastSec.User
         User_IISLog      = $iisUsers
-        AuthPackage      = $lastSec.AuthPackage
+        User_OAuthLog    = $oauthUsers
+        AuthPackage      = if ($lastSec.AuthPackage) { $lastSec.AuthPackage }
+                           elseif ($oauthForIp)      { 'OAuth/Bearer' }
+                           else                      { $null }
         LogonType        = $logonTypeLabel
         LastLogonTime    = $lastSec.Time
+        OAuth_Protocols  = $oauthProto
         SampleEndpoints  = $iisUris
     }
 }
