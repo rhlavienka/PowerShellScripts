@@ -34,10 +34,24 @@
     Looks back 120 minutes and also exports the result to a timestamped CSV file.
 
 .NOTES
-    Version: 1.1 (2026-09-02)
+    Version: 1.2 (2026-09-02)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
 
+    Note: this script only resolves the user identity for Windows-authenticated
+    (Kerberos/NTLM/Basic) connections. Clients that authenticate with an OAuth
+    bearer token (Outlook with Modern/Hybrid Modern Auth, Outlook mobile, REST
+    apps) produce no matching Security-log logon and no cs-username in the IIS
+    log, so for those the User_SecurityLog / User_IISLog / AuthPackage columns
+    stay blank. Their identity lives in the Exchange HttpProxy logs
+    (%ExchangeInstallPath%Logging\HttpProxy\*, columns AuthenticationType=OAuth
+    and AuthenticatedUser), which this script does not read.
+
     Changelog:
+      1.2 (2026-09-02) - IIS W3C timestamps are always UTC; compare them against
+        a UTC threshold and convert to local time for display, so clients are no
+        longer silently dropped in non-UTC time zones (e.g. -MinutesBack 60 on a
+        UTC+2 server used to filter out every IIS entry). Documented the OAuth
+        bearer-token limitation.
       1.1 (2026-09-02) - Fixed IIS log parsing: the "#Fields:" header is now read
         from the top of the file instead of from the last 5000 lines (on a busy
         server the header sits far outside that tail window, which produced
@@ -130,12 +144,14 @@ function Get-IisLogEntries {
     $logDir  = [System.Environment]::ExpandEnvironmentVariables($site.logFile.directory)
     $logPath = Join-Path $logDir "W3SVC$($site.id)"
 
-    $threshold = (Get-Date).AddMinutes(-$MinutesBack)
+    # W3C log timestamps are ALWAYS in UTC (regardless of the "local time
+    # rollover" setting), whereas Get-Date / the Security log are local time.
+    # Compare against a UTC threshold, then convert each entry back to local
+    # for display so it lines up with the Security log column.
+    $thresholdUtc = (Get-Date).ToUniversalTime().AddMinutes(-$MinutesBack)
 
-    # IIS logs are typically in UTC by default (unless set to Local Time), while
-    # the Security log uses the server's local time - account for this offset
-    # when comparing. Scanning the two newest files makes sure a UTC/local
-    # offset or a midnight rollover doesn't drop the entries we need.
+    # Scanning the two newest files makes sure the UTC/local offset or a
+    # midnight rollover doesn't drop the entries we need.
     $logFiles = Get-ChildItem $logPath -Filter "u_ex*.log" -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 2
     if (-not $logFiles) { Write-Warning "No IIS log file found in $logPath."; return @() }
@@ -167,9 +183,12 @@ function Get-IisLogEntries {
             if ($IpFilter -notcontains $entry.'c-ip') { continue }
 
             [datetime]$entryTime = 0
-            if ([DateTime]::TryParse("$($entry.date) $($entry.time)", [ref]$entryTime) -and $entryTime -ge $threshold) {
+            if (-not [DateTime]::TryParse("$($entry.date) $($entry.time)", [ref]$entryTime)) { continue }
+            $entryUtc = [DateTime]::SpecifyKind($entryTime, [DateTimeKind]::Utc)
+
+            if ($entryUtc -ge $thresholdUtc) {
                 [PSCustomObject]@{
-                    Time     = $entryTime
+                    Time     = $entryUtc.ToLocalTime()
                     ClientIP = $entry.'c-ip'
                     User     = $entry.'cs-username'
                     Uri      = $entry.'cs-uri-stem'
