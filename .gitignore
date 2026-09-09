@@ -1,2 +1,9 @@
 Identity/EntraIDconnect/rewrite domain.docx
 temp
+
+# Cross-tenant migration: central config holds tenant IDs and the app client secret
+Exchange/CrossTenantAPP/CrossTenant.Settings.psd1
+Exchange/CrossTenantAPP/README_SK.md
+
+# On-prem mailbox migration: site-specific defaults (database names, e-mails, paths)
+Exchange/OnpremMailboxMigration/OnPremMigration.Settings.psd1
