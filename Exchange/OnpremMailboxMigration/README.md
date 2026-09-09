@@ -5,9 +5,7 @@ single on-premises Exchange organization** - database consolidation, storage /
 hardware refresh, a new DAG, retiring a database, or spreading load off an
 overweight database.
 
-This set is **on-premises only**. It has nothing to do with hybrid or Exchange
-Online onboarding - there is no `-Local` switch, no migration endpoint, no
-`TargetDeliveryDomain`, no cloud module. Everything runs in the on-premises
+This set is **on-premises only**. Everything runs in the on-premises
 Exchange Management Shell against `New-MoveRequest` and the Mailbox Replication
 Service.
 
@@ -137,11 +135,13 @@ accident.
 | `-MaxMailboxSizeGB` | 50 | WARN only |
 | `-MaxItemCount` | 200000 | WARN only |
 | `-MaxWaveMailboxes` | 500 | above this the Ready CSV is split into `_part01`, `_part02`, ... (operational guidance; there is no hard `New-MoveRequest` batch limit) |
-| `-MaxWaveSizeGB` | 2000 | same, by summed primary-mailbox size |
+| `-MaxWaveSizeGB` | 2000 | same, by summed primary-mailbox size. 0 disables it |
 | `-TargetDatabase <string>` | (none) | if given, written into a `TargetDatabase` column on every Ready-CSV row; **if omitted the column is left out and Exchange auto-selects and load-balances the target** (the expected default here) |
-| `-IncludeArchive` | off | also emit a `TargetArchiveDatabase` column |
-| `-WaveName` | derived from filter / date | first path component of the output folder |
-| `-OutputFolder` | `$PSScriptRoot` (or `OutputRoot` from the settings file) | wave sub-folder is created under this |
+| `-IncludeArchive` | off | also emit a `TargetArchiveDatabase` column (value = `-TargetArchiveDatabase`, else blank) |
+| `-TargetArchiveDatabase <string>` | (none) | value for the `TargetArchiveDatabase` column when `-IncludeArchive` is set |
+| `-IdentityColumn` | `EmailAddress` | identity column name in `-CsvPath` |
+| `-WaveName` | `Wave_<yyyyMMdd_HHmmss>` | wave sub-folder name + file-name prefix; 02 passes it to `-BatchName` |
+| `-OutputFolder` | `$PSScriptRoot` (or `OutputRoot` from the settings file) | the wave sub-folder `<OutputFolder>\<WaveName>` is created under this |
 
 ### Readiness checks (per mailbox)
 
@@ -176,8 +176,9 @@ sharing `-BatchName <WaveName>`.
 | Parameter | Req | Effect |
 |---|---|---|
 | `-CsvPath` | yes | Ready CSV from 01. `EmailAddress` column required; optional `TargetDatabase` / `TargetArchiveDatabase` columns are honoured per row |
-| `-WaveName` | yes | value passed to `New-MoveRequest -BatchName`; how 03/04/05/06 find the wave. <= 64 chars, must be unique among live move requests |
+| `-WaveName` | no | value passed to `New-MoveRequest -BatchName`; how 03/04/05/06 find the wave. <= 64 chars. Defaults to the CSV's `_Ready_` prefix (e.g. `Praha-Sales-W1_Ready_...csv` -> `Praha-Sales-W1`), else the CSV base name |
 | `-TargetDatabase <string>` | no | **Usually omitted.** When omitted, `-TargetDatabase` is not passed to `New-MoveRequest` and Exchange uses automatic mailbox distribution - it places and load-balances each mailbox across databases where `IsExcludedFromProvisioning`, `IsExcludedFromProvisioningByOperator`, `IsExcludedFromProvisioningBySpaceMonitoring` and `IsSuspendedFromProvisioning` are all `$false`. When given, every mailbox goes to that one database. A per-row CSV `TargetDatabase` column still wins over the parameter. The scripts never round-robin or capacity-check - that is Exchange's job. |
+| `-TargetArchiveDatabase <string>` | no | archive target for rows without a `TargetArchiveDatabase` CSV column |
 | `-CompleteAfter <datetime>` | no | **finalization time.** The move syncs continuously but finalizes no earlier than this. Local time in, resolved UTC echoed back. Mutually exclusive with `-SuspendWhenReadyToComplete`. |
 | `-SuspendWhenReadyToComplete` | no | sync to ~95%, then `AutoSuspended` until 06 (`Resume`) finalizes it. Mutually exclusive with `-CompleteAfter`. |
 | `-StartAfter <datetime>` | no | MRS does not begin the move before then |
@@ -209,24 +210,27 @@ sharing `-BatchName <WaveName>`.
 
 ```powershell
 $p = @{
-    Identity       = $row.EmailAddress
+    Identity       = $mailboxGuid          # resolved in the pre-flight, not the raw address
     BatchName      = $WaveName
     BadItemLimit   = $BadItemLimit
     LargeItemLimit = $LargeItemLimit
+    Confirm        = $false
 }
-if     ($row.TargetDatabase) { $p.TargetDatabase = $row.TargetDatabase }
-elseif ($TargetDatabase)     { $p.TargetDatabase = $TargetDatabase }   # else: omit -> auto distribution
-if ($row.TargetArchiveDatabase) { $p.ArchiveTargetDatabase = $row.TargetArchiveDatabase }
-if ($CompleteAfter)                { $p.CompleteAfter = $CompleteAfter }
-if ($SuspendWhenReadyToComplete)   { $p.SuspendWhenReadyToComplete = $true }
-if ($StartAfter) { $p.StartAfter = $StartAfter }
-if ($Priority)   { $p.Priority   = $Priority }
-if ($PrimaryOnly){ $p.PrimaryOnly = $true }
-if ($ArchiveOnly){ $p.ArchiveOnly = $true }
+# effective target DB: per-row CSV value, else -TargetDatabase, else omit (auto distribution)
+if ($effectiveTargetDb)        { $p.TargetDatabase        = $effectiveTargetDb }
+if ($effectiveArchiveDb)       { $p.ArchiveTargetDatabase = $effectiveArchiveDb }
+if ($hasCompleteAfter)         { $p.CompleteAfter               = $CompleteAfter }
+if ($SuspendWhenReadyToComplete) { $p.SuspendWhenReadyToComplete = $true }
+if ($hasStartAfter)            { $p.StartAfter            = $StartAfter }
+if ($Priority)                { $p.Priority              = $Priority }
+if ($PrimaryOnly)             { $p.PrimaryOnly           = $true }
+if ($ArchiveOnly)             { $p.ArchiveOnly           = $true }
 New-MoveRequest @p
 ```
 
-A per-row failure is logged and the loop continues; the run ends with a
+`-CompleteAfter` / `-StartAfter` are tested with `$PSBoundParameters.ContainsKey`,
+not for truthiness - an unbound `[datetime]` is `DateTime.MinValue`, which is
+truthy. A per-row failure is logged and the loop continues; the run ends with a
 created / skipped / failed tally and a `<wave>_MoveRequests_<ts>.csv` of what was
 issued.
 
@@ -256,15 +260,16 @@ history files are written regardless.
 | Synced | `AutoSuspended` - initial sync done, waiting for finalization |
 | Completing | `CompletionInProgress` |
 | Completed | `Completed` / `CompletedWithWarning` |
-| Failed | `Failed` |
-| **Stalled** | still Syncing, `StalledSinceUTC` set, **or** `PercentComplete` + `ItemsTransferred` unchanged since the previous run and `-StallHours` (default 6) elapsed |
+| Suspended | manually `Suspended` |
+| Failed | `Failed` / `CompletionFailed` |
+| **Stalled** | still Syncing, `StalledSinceTimestamp` set, **or** `PercentComplete` + `ItemsTransferred` unchanged since the previous run and `-StallHours` (default 6) elapsed |
 | **CorruptItems** | `Failed`, and the failure is only bad/large items over the limit |
 
 ### Output
 
 | File | Content |
 |---|---|
-| `<wave>_Status_<ts>.csv` | per-user snapshot: Class, StatusDetail, PercentComplete, BytesTransferred, ItemsTransferred, SourceDatabase, TargetDatabase, StalledSinceUTC, LastUpdateTimestamp, FailureType, Message |
+| `<wave>_Status_<ts>.csv` | per-mailbox snapshot: Timestamp, Index, Identity, Wave, Class, Status, StatusDetail, PercentComplete, ItemsTransferred, BytesTransferred, SourceDatabase, TargetDatabase, StalledSince, LastUpdateTimestamp, BadItemsEncountered, LargeItemsEncountered, FailureType, Message |
 | `<wave>_Status_<ts>.log` | console transcript |
 | `MigrationStatus-History.csv` | appended every run - the file that makes stall detection work; **keep it** |
 
@@ -292,14 +297,19 @@ For each failing (or named) mailbox, dumps:
   transient store issue, resume and watch
 - zips the per-run folder for a support case
 
-`-WaveName` does the whole wave; `-Identity` does one mailbox.
+Scope (pick one): `-Identity <addr[]>`, `-WaveName`, or `-CsvPath`. With
+`-WaveName` / `-CsvPath` only the Failed / stalled mailboxes are dumped unless
+`-IncludeAll` is given.
 
 ---
 
 ## 05 - Get-OnPremMigrationCompletionReport
 
-Run after finalization. Reconciles the **original scope / Ready CSV** (or
-`-WaveName`) against the live state:
+Run after finalization. Needs `-WaveName`, `-CsvPath` (the original Ready CSV),
+or both - the CSV defines the set that *should* have moved, the wave gives the
+actual move requests. `-ExpectDatabase <db[]>` flags mailboxes that completed
+onto an unexpected database (omit for automatic distribution); `-IncludeGridView`
+opens the reconciliation in `Out-GridView`. Reconciles against the live state:
 
 - every requested mailbox now `Completed`? list anything still `Queued` /
   `Syncing` / `Synced` / `Failed` / with no move request at all
@@ -315,37 +325,42 @@ Run after finalization. Reconciles the **original scope / Ready CSV** (or
 
 ## 06 - Invoke-OnPremMoveRequestControl
 
-Thin, auditable wrapper so finalization and mid-wave control do not need the EAC:
+Thin, auditable wrapper so finalization and mid-wave control do not need the EAC.
+`-Action` is one of:
 
 | `-Action` | Runs |
 |---|---|
-| `Suspend` | `Suspend-MoveRequest` |
-| `Resume` | `Resume-MoveRequest` |
-| `Complete` | `Set-MoveRequest -CompleteAfter (Get-Date)` on every `AutoSuspended` / syncing request in the wave (and `Resume-MoveRequest` for the suspended ones) |
-| `CompleteUser` | the same, for `-Identity <addr[]>` only |
-| `SetLimit` | `Set-MoveRequest -BadItemLimit / -LargeItemLimit / -Priority` |
-| `Remove` | `Remove-MoveRequest` (guards: refuses non-`Completed` unless `-Force`) |
+| `Suspend` | `Suspend-MoveRequest` on `InProgress` / `Queued` requests (`-SuspendComment` optional) |
+| `Resume` | `Resume-MoveRequest` on `Suspended` / `AutoSuspended` / `Failed` / `CompletionFailed` |
+| `Complete` | `Resume-MoveRequest` on `AutoSuspended`; `Set-MoveRequest -CompleteAfter <now> -SuspendWhenReadyToComplete:$false` on syncing / queued / suspended |
+| `SetLimit` | `Set-MoveRequest -BadItemLimit / -LargeItemLimit / -Priority` (needs at least one; `AcceptLargeDataLoss` added automatically at >= 51) |
+| `Remove` | `Remove-MoveRequest` - refuses non-`Completed*` unless `-Force` |
 
-`-WaveName` required (maps to `-BatchName`); `-Identity <string[]>` for the
-per-user actions; `SupportsShouldProcess`, summary + confirm before anything runs.
+Scope: `-WaveName` (maps to `-BatchName`) and/or `-Identity <string[]>` - at
+least one is required. `-OnlyStatus <status[]>` narrows to move requests in a
+given state. `SupportsShouldProcess`; a status breakdown is printed and every
+action is confirmed before it runs.
 
 ---
 
 ## Supporting tools
 
 ### Remove-CompletedMoveRequests.ps1
-`Get-MoveRequest -MoveStatus Completed` (optionally `-BatchName <wave>`) older
-than `-OlderThanDays` (default 7) -> `Remove-MoveRequest`. Completed move
-requests linger and block a later move of the same mailbox.
-`SupportsShouldProcess`, `ConfirmImpact='High'`.
+`Completed` / `CompletedWithWarning` move requests (optionally `-WaveName <wave>`)
+whose completion is older than `-OlderThanDays` (default 7, 0 = no age filter)
+-> `Remove-MoveRequest`. `-IncludeFailed` also clears `Failed` / `CompletionFailed`
+(you lose their statistics). Completed move requests linger and block a later
+move of the same mailbox. `SupportsShouldProcess`, `ConfirmImpact='High'`.
 
 ### Get-MRSHealth.ps1
-`Get-MailboxReplicationService` per Mailbox server: service reachable,
+`Get-MailboxReplicationService` per Mailbox server (`-Server` to narrow):
 `MaxActiveMovesPerSourceMDB` / `PerTargetMDB` / `PerSourceServer` /
-`PerTargetServer` / `MaxTotalMovesPerMRS`, `MaxActiveMovesPerMRS`, and the
-current count of active `MoveRequest`s per source/target database and per server,
-so a wave that will merely **queue** behind the throttling limits is visible
-before it is started. No MRSProxy check - not used for local moves.
+`PerTargetServer` / `MaxTotalMovesPerMRS`, plus the current count of active
+(`Queued` / `InProgress` / `CompletionInProgress`) `MoveRequest`s per source
+database, per target database and overall - rows already at a limit are flagged.
+`-IncomingMoves <n>` projects the queue depth after you add `n` requests. So a
+wave that will merely **queue** behind the throttling limits is visible before it
+is started. No MRSProxy check - not used for local moves.
 
 ### OnPremMigration.Settings.psd1  (git-ignored)
 Optional site defaults so the numbered scripts can run with fewer switches:
