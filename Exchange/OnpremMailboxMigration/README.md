@@ -422,19 +422,6 @@ The wave folder is `<OutputFolder>\<WaveName>` - no date in the folder name, so
 
 ---
 
-## Design conventions (matches the rest of the repo)
-
-- File text in English. Each script carries a `.NOTES` block with
-  `Version: <MAJOR.MINOR> (<yyyy-MM-dd>)`, `Author:` line, `Requires:` line, and
-  a `Changelog:` section. Initial release is `1.0`.
-- `[CmdletBinding()] param()`, self-contained, `$ErrorActionPreference = 'Stop'`.
-- Shared helpers (`Write-Log`, module/session guards) are copied into each
-  script, not factored out - same as the other Exchange sets.
-- State-changing scripts (`02`, `06`, `Remove-CompletedMoveRequests`) use
-  `SupportsShouldProcess` and print a summary before acting.
-
----
-
 ## Still open / not yet built
 
 1. **Cross-version / cross-DAG moves** - if any target databases are on a newer
