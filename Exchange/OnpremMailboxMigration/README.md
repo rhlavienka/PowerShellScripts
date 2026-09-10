@@ -9,9 +9,6 @@ This set is **on-premises only**. Everything runs in the on-premises
 Exchange Management Shell against `New-MoveRequest` and the Mailbox Replication
 Service.
 
-> Section ["Still open"](#still-open--not-yet-built) lists what is deliberately
-> not built yet.
-
 **Mechanism: `New-MoveRequest` per mailbox**, tagged with a shared
 `-BatchName <wave>` so a whole wave is one filter (`Get-MoveRequest -BatchName`).
 `New-MoveRequest` natively provides what this task needs:
@@ -68,7 +65,7 @@ Practical consequences, and why `Get-MRSHealth.ps1` is in the set:
 | 06 | `06-Invoke-OnPremMoveRequestControl.ps1` | Suspend / Resume / Complete / Remove / Set move requests for a wave or named mailboxes |
 | - | `Remove-CompletedMoveRequests.ps1` | Housekeeping - clear finished move requests that would block a re-move |
 | - | `Get-MRSHealth.ps1` | MRS throttling limits vs. current active moves per database / server |
-| - | `OnPremMigration.Settings.psd1` | (data, git-ignored) site defaults: notification addresses, size caps, output root |
+| - | `OnPremMigration.Settings.psd1` | (data, git-ignored) site defaults: size caps, wave-split limits, output root |
 
 All scripts run in the on-premises Exchange Management Shell (Exchange 2013+).
 
@@ -189,10 +186,6 @@ sharing `-BatchName <WaveName>`.
 | `-Delimiter` | no | for the local CSV validation pass |
 
 `-WhatIf` / `-Confirm` via `[CmdletBinding(SupportsShouldProcess, ConfirmImpact='High')]`.
-
-> `New-MoveRequest` has **no** completion-notification e-mail (that was a
-> migration-batch feature). Completion is tracked by 03 / 05; a notification
-> wrapper is [not built yet](#still-open--not-yet-built).
 
 ### Pre-flight
 
@@ -367,7 +360,6 @@ Optional site defaults so the numbered scripts can run with fewer switches:
 
 ```powershell
 @{
-    NotificationEmails    = @('messaging-team@contoso.com')  # used by 03/05 wrappers, not by New-MoveRequest
     MaxMailboxSizeGB      = 50
     MaxWaveMailboxes      = 500
     OutputRoot            = 'D:\Migration\Waves'
@@ -419,20 +411,3 @@ The wave folder is `<OutputFolder>\<WaveName>` - no date in the folder name, so
 - **MRS** (`MSExchangeMailboxReplication`) running on the Mailbox servers; for a
   cross-version move the target database must be on the equal-or-higher version.
 - Keep `MigrationStatus-History.csv` between runs of 03.
-
----
-
-## Still open / not yet built
-
-1. **Cross-version / cross-DAG moves** - if any target databases are on a newer
-   Exchange build than the source, `Get-MRSHealth` and the completion report
-   could add version-aware checks.
-2. **Archive to a *different* database than the primary** - supported via a
-   `TargetArchiveDatabase` CSV column / `-TargetArchiveDatabase`, but not yet
-   surfaced in 01's readiness output.
-3. **Completion notification** - `New-MoveRequest` sends none. A Task Scheduler
-   wrapper that runs 03 on a timer and e-mails the summary / escalates on
-   Failed/Stalled is not built (the `NotificationEmails` setting is a placeholder
-   for it).
-4. **Scope-drift re-check** - a `-ReCheck` mode on 01 that diffs the current
-   filter result against a live wave just before finalization is not built.

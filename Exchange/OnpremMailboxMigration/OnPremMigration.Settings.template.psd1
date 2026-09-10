@@ -20,8 +20,4 @@
     # 02 - default item limits for New-MoveRequest.
     DefaultBadItemLimit   = 0
     DefaultLargeItemLimit = 0
-
-    # Informational only - not passed to New-MoveRequest (it has no notification
-    # feature). Kept here for a future 03/05 e-mail wrapper.
-    NotificationEmails = @('messaging-team@contoso.com')
 }

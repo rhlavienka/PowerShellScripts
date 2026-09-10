@@ -44,8 +44,7 @@
                                         Message
       <WaveName>_MoveRequests_<ts>.log   console transcript
 
-    New-MoveRequest sends no completion e-mail (that was a migration-batch
-    feature). Track the wave with 03-Get-OnPremMigrationStatus.ps1.
+    Track the wave with 03-Get-OnPremMigrationStatus.ps1.
 
 .PARAMETER CsvPath
     The <WaveName>_Ready_*.csv from 01 (or a _partNN file). Column
@@ -107,7 +106,7 @@
         -SuspendWhenReadyToComplete -BadItemLimit 10
 
 .NOTES
-    Version: 1.0 (2026-09-09)
+    Version: 1.0 (2026-09-10)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
 
     Requires: on-premises Exchange Management Shell (Exchange 2013 or newer),
