@@ -24,7 +24,9 @@
         counts; if that request is later removed, the mailbox becomes eligible
         again. To release a prepared but abandoned batch, delete its folder.
 
-    Candidates are walked in -SortBy order; each one gets the same readiness
+    Candidates are walked in -SortBy order - by default spread round-robin
+    over the source servers and databases so one batch does not hammer a
+    single database or server (see -SortBy Spread); each one gets the same readiness
     checks as 01 (movable type, no pending Restore / Import / Export request,
     ExchangeGuid stamped, size / item-count WARN, archive, holds). FAIL rows are
     reported and skipped, and the batch is topped up with the next candidate
@@ -54,9 +56,23 @@
 
 .PARAMETER SortBy
     Order in which candidates fill the batch:
-      Database        - database name, then display name (default)
+      Spread          - spread the read load over the source side (default):
+                        round-robin over the source servers (the server that
+                        hosts the active copy of each database), within each
+                        server round-robin over its databases, mailboxes in
+                        random order inside each database. A batch of N from
+                        S servers therefore takes ~N/S mailboxes per server,
+                        split evenly across that server's databases; a
+                        server or database that runs out simply drops out of
+                        the rotation.
+      Database        - database name, then display name
       SizeAscending   - smallest mailboxes first
       SizeDescending  - largest mailboxes first
+
+.PARAMETER RandomSeed
+    Optional seed for -SortBy Spread. The same seed over the same candidates
+    gives the same order (reproducible dry runs). Default: a new random order
+    on every run.
 
 .PARAMETER TargetDatabase
     Optional. When given, a "TargetDatabase" column with this single value is
@@ -85,20 +101,24 @@
 .EXAMPLE
     .\01b-New-OnPremMigrationBatch.ps1 -BatchSize 50
 
-    Next 50 mailboxes from all excluded databases, batch named e.g. 20260928_141500.
+    Next 50 mailboxes from all excluded databases, spread across the source
+    servers and databases, batch named e.g. 20260928_141500.
 
 .EXAMPLE
     .\01b-New-OnPremMigrationBatch.ps1 -BatchSize 100 -BatchName "DB01-Drain-03" `
         -Database "DB01" -SortBy SizeAscending
 
 .NOTES
-    Version: 1.0 (2026-09-28)
+    Version: 1.1 (2026-09-28)
     Author:  Richard Hlavienka (richard.hlavienka@elyvyn.com)
 
     Requires: on-premises Exchange Management Shell (Exchange 2013 or newer).
               View-Only Recipients is enough. No Exchange Online / Graph modules.
 
     Changelog:
+    1.1 (2026-09-28) - -SortBy Spread (new default): round-robin over source
+                       servers and databases, random order inside a database;
+                       -RandomSeed; SourceServer column and per-server summary.
     1.0 (2026-09-28) - Initial version.
 #>
 
@@ -112,8 +132,10 @@ param(
 
     [string[]]$Database,
 
-    [ValidateSet('Database', 'SizeAscending', 'SizeDescending')]
-    [string]$SortBy = 'Database',
+    [ValidateSet('Spread', 'Database', 'SizeAscending', 'SizeDescending')]
+    [string]$SortBy = 'Spread',
+
+    [int]$RandomSeed,
 
     [string]$TargetDatabase,
 
@@ -314,7 +336,8 @@ Write-Log "Candidates" -Level Head
 $candidates = New-Object System.Collections.Generic.List[object]
 foreach ($db in $excludedDbs)
 {
-    $dbName = [string]$db.Name
+    $dbName   = [string]$db.Name
+    $dbServer = [string]$db.Server    # server hosting the active copy = where the move reads from
     $mbxs   = @(Get-Mailbox -Database $dbName -ResultSize Unlimited -ErrorAction SilentlyContinue)
 
     # one statistics call per database instead of one per mailbox
@@ -324,7 +347,7 @@ foreach ($db in $excludedDbs)
         if (-not $s.DisconnectDate) { $statsByGuid[[string]$s.MailboxGuid] = $s }
     }
 
-    Write-Log ("  {0,-30} {1} mailbox(es)" -f $dbName, $mbxs.Count) -Level Info
+    Write-Log ("  {0,-30} {1,-20} {2} mailbox(es)" -f $dbName, $dbServer, $mbxs.Count) -Level Info
     foreach ($m in $mbxs)
     {
         $st = $statsByGuid[[string]$m.ExchangeGuid]
@@ -332,19 +355,71 @@ foreach ($db in $excludedDbs)
                 Mailbox  = $m
                 Stats    = $st
                 Database = $dbName
+                Server   = $dbServer
                 SizeGB   = if ($st) { Get-SizeGB $st.TotalItemSize } else { $null }
             })
     }
 }
 
+$rng = if ($PSBoundParameters.ContainsKey('RandomSeed')) { [System.Random]::new($RandomSeed) } else { [System.Random]::new() }
+
+function Get-Shuffled
+{
+    # Fisher-Yates shuffle; returns the array as one object so callers keep it intact
+    param([object[]]$Items)
+    $a = @($Items)
+    for ($i = $a.Count - 1; $i -gt 0; $i--)
+    {
+        $j = $rng.Next($i + 1)
+        $a[$i], $a[$j] = $a[$j], $a[$i]
+    }
+    , $a
+}
+
+function Get-SpreadOrder
+{
+    # server ring -> database queues -> shuffled mailboxes; take one mailbox per
+    # server per round, rotating through that server's databases
+    param([object[]]$Items)
+    $rings = [System.Collections.Generic.List[object]]::new()
+    foreach ($sg in (Get-Shuffled @($Items | Group-Object Server)))
+    {
+        $queues = [System.Collections.Generic.List[object]]::new()
+        foreach ($dg in (Get-Shuffled @($sg.Group | Group-Object Database)))
+        {
+            $queues.Add([System.Collections.Generic.Queue[object]]::new([object[]](Get-Shuffled $dg.Group)))
+        }
+        $rings.Add([PSCustomObject]@{ Queues = $queues; Next = 0 })
+    }
+
+    $out = [System.Collections.Generic.List[object]]::new()
+    while ($rings.Count)
+    {
+        $s = 0
+        while ($s -lt $rings.Count)
+        {
+            $ring = $rings[$s]
+            $q    = $ring.Queues[$ring.Next]
+            $out.Add($q.Dequeue())
+            if ($q.Count -eq 0) { $ring.Queues.RemoveAt($ring.Next) } else { $ring.Next++ }
+            if ($ring.Queues.Count -eq 0) { $rings.RemoveAt($s); continue }
+            $ring.Next = $ring.Next % $ring.Queues.Count
+            $s++
+        }
+    }
+    $out
+}
+
 $ordered = switch ($SortBy)
 {
+    'Spread'         { Get-SpreadOrder $candidates }
     'SizeAscending'  { $candidates | Sort-Object { [double]$_.SizeGB }, { [string]$_.Mailbox.DisplayName } }
     'SizeDescending' { $candidates | Sort-Object @{ Expression = { [double]$_.SizeGB }; Descending = $true }, @{ Expression = { [string]$_.Mailbox.DisplayName } } }
     default          { $candidates | Sort-Object Database, { [string]$_.Mailbox.DisplayName } }
 }
 $ordered = @($ordered)
-Write-Log "$($ordered.Count) candidate mailbox(es) on excluded databases, order: $SortBy." -Level Info
+Write-Log ("{0} candidate mailbox(es) on excluded databases, order: {1}{2}." -f $ordered.Count, $SortBy,
+    $(if ($SortBy -eq 'Spread' -and $PSBoundParameters.ContainsKey('RandomSeed')) { " (seed $RandomSeed)" } else { '' })) -Level Info
 
 if (-not $ordered) { Write-Log "No mailboxes left on the source databases." -Level Ok; return }
 
@@ -474,6 +549,7 @@ foreach ($c in $ordered)
             RecipientTypeDetails = $rtd
             PrimarySmtpAddress   = $primary
             CurrentDatabase      = $currentDb
+            SourceServer         = $c.Server
             MailboxSizeGB        = $sizeGB
             ItemCount            = $items
             ArchiveState         = $archiveState
@@ -528,9 +604,13 @@ Write-Log "Candidates not examined in this run (left for later batches): $([math
 if ($ready.Count)
 {
     Write-Log "" -Level Head
-    Write-Log "Batch members by current database" -Level Head
-    $ready | Group-Object CurrentDatabase | Sort-Object Name | ForEach-Object {
-        Write-Log ("  {0,-30} {1}" -f $_.Name, $_.Count) -Level Info
+    Write-Log "Batch members by source server / database" -Level Head
+    $ready | Group-Object SourceServer | Sort-Object Name | ForEach-Object {
+        $gb = ($_.Group | Measure-Object -Property MailboxSizeGB -Sum).Sum
+        Write-Log ("  {0,-30} {1,5} mailbox(es) {2,10:N1} GB" -f $_.Name, $_.Count, [double]$gb) -Level Info
+        $_.Group | Group-Object CurrentDatabase | Sort-Object Name | ForEach-Object {
+            Write-Log ("    {0,-28} {1,5}" -f $_.Name, $_.Count) -Level Info
+        }
     }
 }
 
